@@ -20,13 +20,7 @@ str() { if [ -n "$1" ]; then printf '"%s"' "$(esc "$1")"; else printf 'null'; fi
 bool() { if [ "$1" = 1 ]; then printf true; else printf false; fi; }
 
 # --- chrome
-CHROME=""
-for p in "${CHROME_PATH:-}" "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
-         "/Applications/Chromium.app/Contents/MacOS/Chromium" \
-         "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary" \
-         "$(command -v google-chrome 2>/dev/null)" "$(command -v chromium 2>/dev/null)"; do
-  [ -n "$p" ] && [ -x "$p" ] && { CHROME="$p"; break; }
-done
+CHROME="$(node "$(dirname "${BASH_SOURCE[0]}")/_chrome.mjs" 2>/dev/null || true)"
 
 # --- ffmpeg
 FFMPEG="$(command -v ffmpeg)"; FFPROBE="$(command -v ffprobe)"

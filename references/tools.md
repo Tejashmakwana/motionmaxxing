@@ -27,6 +27,10 @@ Same definitions as SKILL.md and `slop.md` Part 2.
 ## providers.sh
 `bash "$SKILL/scripts/providers.sh"` -> JSON: `ready`, chrome, ffmpeg (+missing filters), `elevenlabs.key`, `codex.image_generation` (true / false / null), `disk_free_gb`, `disk_low`. Never installs. Low disk (< 3 GB): short low-res drafts, delete outputs.
 
+Browser selection: `CHROME_PATH` (must be executable), installed Chrome for Testing / Playwright Chromium, then system Chrome. `PLAYWRIGHT_BROWSERS_PATH` overrides the Playwright cache root. The same selection is used by `providers.sh` and `_cdp.mjs`; `node scripts/_chrome.mjs` prints the selected executable without launching it. macOS launches disable app-bundle code-sign clones; normal close waits for browser exit, then deletes only that run's temporary profile.
+
+Browser regression checks: `node --test tests/chrome.test.mjs`. Run the real-browser lifecycle/clone checks with `MOTIONMAXXING_BROWSER_TESTS=1 node --test tests/browser.test.mjs` (uses the selected local browser; requires no network).
+
 ## brand.mjs
 `node "$SKILL/scripts/brand.mjs" https://site.com film/brand` -> `brand.json`, `BRAND.md`, `board.png` (LOOK at it), `logo/`, `fonts/`, `screens/`, `media/`. Flags colour roles, blank images, nav-strip screenshots. Empty page = blocked: say so, fall back to `fetch_logo.mjs` + what the user supplies.
 

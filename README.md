@@ -193,7 +193,7 @@ A gate that fails is fixed, not argued. Scripts print the numbers and the agent 
 
 ## Install
 
-**Requirements:** Node 22+, Python 3, ffmpeg, Google Chrome. Optional: an ElevenLabs key for voice, sound effects and music (`ELEVENLABS_API_KEY`); the Codex CLI with image generation for surface plates.
+**Requirements:** Node 22+, Python 3, ffmpeg, Chrome (Chrome for Testing preferred). Optional: an ElevenLabs key for voice, sound effects and music (`ELEVENLABS_API_KEY`); the Codex CLI with image generation for surface plates.
 
 **Claude Code**
 
@@ -201,6 +201,8 @@ A gate that fails is fixed, not argued. Scripts print the numbers and the agent 
 git clone https://github.com/Tejashmakwana/motionmaxxing ~/.claude/skills/motionmaxxing
 bash ~/.claude/skills/motionmaxxing/install.sh        # checks the requirements; installs nothing system-wide
 ```
+
+Browser selection is shared by the renderer, captures, lint and requirement checks. It honors an executable `CHROME_PATH` first, then prefers Chrome for Testing (including the newest installed Playwright Chromium build) before regular Chrome. Nothing is downloaded automatically. On macOS, automation disables `MacAppCodeSignClone` so repeated runs do not leave app-bundle snapshots in `/private/var/folders/.../X/`. Browser shutdown waits for exit before removing its temporary profile.
 
 Or, from a checkout somewhere else: `./install.sh` links it into `~/.claude/skills/motionmaxxing`. Flags: `--dir PATH` for another skills folder, `--copy` to copy instead of symlink, `--force` to replace an existing install.
 
