@@ -9,6 +9,8 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { findChrome, chromeFlags } from './_chrome.mjs';
+export { findChrome } from './_chrome.mjs';
 
 export function die(msg, code = 1) { console.error(`error: ${msg}`); process.exit(code); }
 
@@ -20,17 +22,6 @@ export function helpFrom(metaUrl) {
     if (l.startsWith('//')) out.push(l.replace(/^\/\/ ?/, '')); else break;
   }
   return out.join('\n');
-}
-
-export function findChrome() {
-  const c = [process.env.CHROME_PATH,
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    '/Applications/Chromium.app/Contents/MacOS/Chromium',
-    '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
-    '/usr/bin/google-chrome', '/usr/bin/chromium', '/usr/bin/chromium-browser'];
-  const p = c.find((x) => x && fs.existsSync(x));
-  if (!p) die('Google Chrome not found (set CHROME_PATH)');
-  return p;
 }
 
 // Minimal argv parser: flags = {name: 'string'|'bool'}; returns {pos:[], opt:{}}
@@ -69,11 +60,19 @@ export class CDP {
       this.pending.clear(); this.closed = true;
     });
   }
-  static async connect(url) {
+  static async connect(url, timeout = 25000) {
     const ws = new WebSocket(url);
-    await new Promise((res, rej) => {
-      ws.addEventListener('open', res, { once: true });
-      ws.addEventListener('error', () => rej(new Error('cannot connect to ' + url)), { once: true });
+    await new Promise((resolve, reject) => {
+      const finish = (error) => {
+        clearTimeout(timer);
+        ws.removeEventListener('open', onOpen); ws.removeEventListener('error', onError);
+        if (error) { try { ws.close(); } catch {} reject(error); } else resolve();
+      };
+      const onOpen = () => finish();
+      const onError = () => finish(new Error('cannot connect to ' + url));
+      const timer = setTimeout(() => finish(new Error('CDP connection timed out: ' + url)), timeout);
+      ws.addEventListener('open', onOpen, { once: true });
+      ws.addEventListener('error', onError, { once: true });
     });
     return new CDP(ws);
   }
@@ -89,40 +88,80 @@ export class CDP {
   on(method, fn, sid) { const h = { method, fn, sid }; this.handlers.push(h); return () => { this.handlers = this.handlers.filter((x) => x !== h); }; }
 }
 
-export async function launchChrome({ args = [], width = 1920, height = 1080, headless = true } = {}) {
+export async function launchChrome({ args = [], width = 1920, height = 1080, headless = true, timeout = 25000 } = {}) {
+  if (!Number.isFinite(timeout) || timeout <= 0) throw new Error('Chrome startup timeout must be positive');
   const exe = findChrome();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md-chrome-'));
-  const flags = [
+  const flags = chromeFlags([
     headless ? '--headless=new' : '', '--remote-debugging-port=0', `--user-data-dir=${dir}`,
     `--window-size=${width},${height}`, '--no-first-run', '--no-default-browser-check', '--disable-extensions',
     '--disable-sync', '--hide-scrollbars', '--mute-audio', '--force-color-profile=srgb', '--disable-dev-shm-usage',
     '--autoplay-policy=no-user-gesture-required', '--disable-renderer-backgrounding', '--disable-background-timer-throttling',
     '--disable-backgrounding-occluded-windows', '--disable-features=Translate,MediaRouter,OptimizationHints',
     '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--disable-popup-blocking', ...args, 'about:blank',
-  ].filter(Boolean);
+  ].filter(Boolean));
   const proc = spawn(exe, flags, { stdio: ['ignore', 'ignore', 'pipe'] });
-  let dead = false, errTail = '';
-  proc.on('exit', () => { dead = true; });
-  const wsUrl = await new Promise((res, rej) => {
-    const t = setTimeout(() => rej(new Error('Chrome did not report a DevTools URL in 25s\n' + errTail.slice(-600))), 25000);
-    proc.stderr.on('data', (d) => {
-      errTail += d; const m = /DevTools listening on (ws:\/\/\S+)/.exec(errTail);
-      if (m) { clearTimeout(t); res(m[1]); }
-    });
-    proc.on('exit', (c) => { clearTimeout(t); rej(new Error(`Chrome exited early (code ${c})\n${errTail.slice(-600)}`)); });
+  let dead = false, cdp, closePromise, errTail = '';
+  const exited = new Promise((resolve) => {
+    proc.once('exit', () => { dead = true; resolve(); });
+    proc.on('error', () => { if (!proc.pid) { dead = true; resolve(); } });
   });
-  const cdp = await CDP.connect(wsUrl);
-  let closed = false;
-  const close = async () => {
-    if (closed) return; closed = true;
-    try { await cdp.send('Browser.close', {}, undefined, 3000); } catch {}
-    try { cdp.ws.close(); } catch {}
-    if (!dead) { proc.kill('SIGTERM'); await new Promise((r) => { proc.once('exit', r); setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} r(); }, 2000); }); }
-    try { fs.rmSync(dir, { recursive: true, force: true }); } catch {}
-  };
-  process.on('exit', () => { try { proc.kill('SIGKILL'); } catch {} try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
-  for (const s of ['SIGINT', 'SIGTERM']) process.on(s, () => { close().finally(() => process.exit(130)); });
-  const version = (await cdp.send('Browser.getVersion')).product;
+  async function waitForExit(ms) {
+    if (dead) return true;
+    let timer;
+    try { return await Promise.race([exited.then(() => true), new Promise((resolve) => { timer = setTimeout(() => resolve(false), ms); })]); }
+    finally { clearTimeout(timer); }
+  }
+  function removeHooks() {
+    process.off('exit', onExit);
+    process.off('SIGINT', onInterrupt);
+    process.off('SIGTERM', onTerminate);
+  }
+  const close = () => closePromise ||= (async () => {
+    try { if (!dead && cdp) await cdp.send('Browser.close', {}, undefined, 3000); } catch {}
+    // A successful CDP reply does not mean Chrome has exited. Let its shutdown and
+    // clone-cleanup helper finish before falling back to signals.
+    if (!await waitForExit(5000)) {
+      proc.kill('SIGTERM');
+      if (!await waitForExit(2000)) { proc.kill('SIGKILL'); await waitForExit(2000); }
+    }
+    if (!dead) throw new Error(`Chrome did not exit (pid ${proc.pid}); temporary profile retained: ${dir}`);
+    try { cdp?.ws.close(); } catch {}
+    removeHooks();
+    fs.rmSync(dir, { recursive: true, force: true });
+  })();
+  // Synchronous process exit cannot await CDP. Signal only this live child, and
+  // leave its profile intact until it has stopped rather than deleting under it.
+  const onExit = () => { if (!dead) { try { proc.kill('SIGTERM'); } catch {} } };
+  const onInterrupt = () => { close().finally(() => process.exit(130)); };
+  const onTerminate = () => { close().finally(() => process.exit(143)); };
+  process.on('exit', onExit);
+  process.on('SIGINT', onInterrupt);
+  process.on('SIGTERM', onTerminate);
+  let version;
+  try {
+    const wsUrl = await new Promise((resolve, reject) => {
+      const finish = (error, url) => {
+        clearTimeout(timer);
+        proc.stderr.off('data', onData); proc.off('exit', onEarlyExit); proc.off('error', onError);
+        if (error) reject(error); else resolve(url);
+      };
+      const onData = (data) => {
+        errTail = (errTail + data).slice(-8192);
+        const match = /DevTools listening on (ws:\/\/\S+)/.exec(errTail);
+        if (match) finish(null, match[1]);
+      };
+      const onEarlyExit = (code, signal) => finish(new Error(`Chrome exited early (code ${code}, signal ${signal})\n${errTail.slice(-600)}`));
+      const onError = (error) => finish(error);
+      const timer = setTimeout(() => finish(new Error(`Chrome did not report a DevTools URL in ${timeout}ms\n${errTail.slice(-600)}`)), timeout);
+      proc.stderr.on('data', onData); proc.once('exit', onEarlyExit); proc.once('error', onError);
+    });
+    cdp = await CDP.connect(wsUrl, timeout);
+    version = (await cdp.send('Browser.getVersion', {}, undefined, timeout)).product;
+  } catch (error) {
+    try { await close(); } catch {}
+    throw error;
+  }
 
   async function newPage({ width: w = width, height: h = height, scale = 1 } = {}) {
     const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
@@ -143,10 +182,14 @@ export async function launchChrome({ args = [], width = 1920, height = 1080, hea
         return r.result.value;
       },
       async goto(url, { timeout = 30000 } = {}) {
-        const loaded = new Promise((res) => { const off = page.on('Page.loadEventFired', () => { off(); res(true); }); setTimeout(() => { off(); res(false); }, timeout); });
-        const r = await send('Page.navigate', { url });
-        if (r.errorText) throw new Error(`navigation failed: ${r.errorText} (${url})`);
-        return loaded; // false = load event timed out (page may still be usable)
+        // false = load event timed out (page may still be usable)
+        let timer, off;
+        const loaded = new Promise((res) => { off = page.on('Page.loadEventFired', () => res(true)); timer = setTimeout(() => res(false), timeout); });
+        try {
+          const r = await send('Page.navigate', { url });
+          if (r.errorText) throw new Error(`navigation failed: ${r.errorText} (${url})`);
+          return await loaded;
+        } finally { clearTimeout(timer); off(); }
       },
       async shot({ format = 'png', quality = 90, clip, beyond = false } = {}) {
         const r = await send('Page.captureScreenshot', { format, ...(format === 'jpeg' ? { quality } : {}), ...(clip ? { clip } : {}), captureBeyondViewport: beyond }, 60000);
