@@ -234,7 +234,7 @@ All **practice, not from the corpus** except where the brief's tools set the tar
 
 ## 9. Fallbacks when ElevenLabs is absent
 
-`voice.py` exits with code 3 when no key is found (`ELEVENLABS_API_KEY`, `./.env`, `~/.elevenlabs`, `~/.config/elevenlabs`) and with code 4 when the key or plan refuses the feature (HTTP 401/402/403; a free or trial key typically refuses `music` and may still allow `sfx`). Do not stall: pick one fallback, say which in the report, and build the film so a real voice can drop in later. For music and SFX the first fallback is **native audio** (section 9a): `voice.py music|sfx --source auto --score audio/score.json` tries ElevenLabs and falls back per kind, printing `FALLBACK <kind>: native (<reason>)`.
+`voice.py` can hold several keys (`ELEVENLABS_API_KEY`, `ELEVENLABS_API_KEY_2` ... `_9` or a comma list in `ELEVENLABS_API_KEYS`, in the environment or `.env`): they are tried in order, a key out of credits or invalid is skipped for the run, and `voice.py keys` lists them with their credits. It exits with code 3 when no key is found (`ELEVENLABS_API_KEY`, `./.env`, `~/.elevenlabs`, `~/.config/elevenlabs`) and with code 4 when every key refuses the feature (HTTP 401/402/403; a free or trial key typically refuses `music` and may still allow `sfx`). Do not stall: pick one fallback, say which in the report, and build the film so a real voice can drop in later. For music and SFX the first fallback is **native audio** (section 9a): `voice.py music|sfx --source auto --score audio/score.json` tries ElevenLabs and falls back per kind, printing `FALLBACK <kind>: native (<reason>)`.
 
 | Fallback | How | Sync accuracy | When |
 |---|---|---|---|

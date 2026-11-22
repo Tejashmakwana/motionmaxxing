@@ -193,7 +193,7 @@ A gate that fails is fixed, not argued. Scripts print the numbers and the agent 
 
 ## Install
 
-**Requirements:** Node 22+, Python 3, ffmpeg, Google Chrome. Optional: an ElevenLabs key for voice, sound effects and music (`ELEVENLABS_API_KEY`); without one (or when a plan refuses music), music and sound effects are synthesized locally by `scripts/score.mjs`. The Codex CLI with image generation for surface plates.
+**Requirements:** Node 22+, Python 3, ffmpeg, Google Chrome. Optional: one or more ElevenLabs keys for voice, sound effects and music (`ELEVENLABS_API_KEY`, plus `ELEVENLABS_API_KEY_2`, `_3`, ... as fallbacks tried in order when a key runs out of credits; `python3 scripts/voice.py keys` shows them); without one (or when a plan refuses music), music and sound effects are synthesized locally by `scripts/score.mjs`. The Codex CLI with image generation for surface plates.
 
 **Claude Code**
 

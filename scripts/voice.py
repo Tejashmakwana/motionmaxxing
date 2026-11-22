@@ -40,7 +40,18 @@ Usage:
               "FALLBACK music: native (reason)": copy that line into NOTE.md.
       Make the score first: node scripts/score.mjs plan --events out.mp4.events.json --duration S --hero <frame> ...
 
-Key lookup: $ELEVENLABS_API_KEY, ./.env, ~/.elevenlabs, ~/.config/elevenlabs.
+  python3 voice.py keys          every key found (masked), where it came from, and its credits left + next reset (spends nothing)
+
+Keys: several can be held, tried in order; when one is out of credits (or invalid) the next one is used, so a key whose
+credits reset monthly never has to be replaced. Sources, all merged in this order (duplicates dropped):
+  $ELEVENLABS_API_KEYS (comma/space separated), $ELEVENLABS_API_KEY, $ELEVENLABS_API_KEY_2 .. _9,
+  then ./.env, <skill>/.env, ~/.elevenlabs, ~/.config/elevenlabs, with the same names, one per line, e.g.
+      ELEVENLABS_API_KEY=sk_first          (tried first)
+      ELEVENLABS_API_KEY_2=sk_second
+      ELEVENLABS_API_KEY_3=sk_third
+  A key refused for credits / validity (HTTP 401 quota_exceeded or invalid_api_key, 402) is skipped for the rest of the run;
+  a key refused for a permission or plan (missing_permissions, 403) is skipped for that request only. ElevenLabs checks the
+  quota before generating, so a refused request costs nothing.
 Exit codes: 0 ok, 1 error, 2 bad usage, 3 no ElevenLabs key, 4 the key or plan does not allow this feature (HTTP 401/402/403).
 """
 from __future__ import annotations
@@ -57,42 +68,73 @@ def die(msg, code=1):
     sys.exit(code)
 
 
-def _key_from_text(txt):
-    for ln in txt.splitlines():
-        m = re.match(r"\s*(?:export\s+)?(?:ELEVENLABS_API_KEY|ELEVEN_API_KEY|XI_API_KEY|api[_-]?key)\s*[=:]\s*['\"]?([^'\"\s#]+)", ln, re.I)
-        if m:
-            return m.group(1)
+KEY_RE = re.compile(r"\s*(?:export\s+)?(ELEVENLABS_API_KEYS?(?:_\d+)?|ELEVEN_API_KEY|XI_API_KEY|api[_-]?key)\s*[=:]\s*['\"]?([^'\"#]+?)['\"]?\s*(?:#.*)?$", re.I)
+SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _split(v):
+    return [x for x in re.split(r"[,\s]+", v or "") if re.fullmatch(r"[A-Za-z0-9_\-]{20,}", x)]
+
+
+def _keys_from_text(txt):
+    out = [k for ln in txt.splitlines() for m in [KEY_RE.match(ln)] if m for k in _split(m.group(2))]
     t = txt.strip()
-    return t if re.fullmatch(r"[A-Za-z0-9_\-]{20,}", t) else None
+    return out or ([t] if re.fullmatch(r"[A-Za-z0-9_\-]{20,}", t) else [])
+
+
+_POOL = []          # [(key, source)] in priority order
+_DEAD = set()       # keys refused for credits / validity during this run
+
+
+def all_keys():
+    """Every key found, in priority order, as [(key, source)]. Cached for the run."""
+    if _POOL:
+        return _POOL
+    seen = set()
+    def add(ks, src):
+        for k in ks:
+            k = k.strip()
+            if k and k not in seen:
+                seen.add(k); _POOL.append((k, src))
+    add(_split(os.environ.get("ELEVENLABS_API_KEYS")), "$ELEVENLABS_API_KEYS")
+    add(_split(os.environ.get("ELEVENLABS_API_KEY")), "$ELEVENLABS_API_KEY")
+    for i in range(2, 10):
+        add(_split(os.environ.get("ELEVENLABS_API_KEY_%d" % i)), "$ELEVENLABS_API_KEY_%d" % i)
+    for p in ("./.env", os.path.join(SKILL_DIR, ".env"), "~/.elevenlabs", "~/.config/elevenlabs", "~/.elevenlabs/api_key", "~/.config/elevenlabs/api_key"):
+        p = os.path.abspath(os.path.expanduser(p))
+        if os.path.isfile(p):
+            try:
+                add(_keys_from_text(open(p).read()), p)
+            except OSError:
+                pass
+    return _POOL
+
+
+def mask(k):
+    return "key #%d (...%s)" % (next((i + 1 for i, (x, _) in enumerate(all_keys()) if x == k), 0), k[-4:])
 
 
 def get_key(required=True):
-    k = os.environ.get("ELEVENLABS_API_KEY")
-    if k:
-        return k.strip()
-    for p in ("./.env", "~/.elevenlabs", "~/.config/elevenlabs", "~/.elevenlabs/api_key", "~/.config/elevenlabs/api_key"):
-        p = os.path.expanduser(p)
-        if os.path.isfile(p):
-            try:
-                k = _key_from_text(open(p).read())
-            except OSError:
-                k = None
-            if k:
-                return k
+    """The first key not yet refused for credits; http() moves on to the next keys by itself when a request is refused."""
+    live = [k for k, _ in all_keys() if k not in _DEAD]
+    if live:
+        return live[0]
     if required:
         die(NOKEY, 3)
     return None
 
 
 class ApiError(Exception):
-    def __init__(self, msg, code=1):
+    def __init__(self, msg, code=1, status=""):
         super().__init__(msg)
         self.code = code
+        self.status = status          # ElevenLabs detail.status, e.g. quota_exceeded, invalid_api_key, missing_permissions
 
 
-def http(method, path, body=None, key=None, raw=False, retries=2):
-    url = path if path.startswith("http") else API + path
-    data = json.dumps(body).encode() if body is not None else None
+DEAD_STATUS = ("quota_exceeded", "invalid_api_key", "insufficient", "payment")
+
+
+def _http1(method, url, data, key, raw, retries):
     hdr = {"xi-api-key": key or "", "User-Agent": "motionmaxxing/1.0", "Accept": "*/*"}
     if data is not None:
         hdr["Content-Type"] = "application/json"
@@ -103,10 +145,12 @@ def http(method, path, body=None, key=None, raw=False, retries=2):
                 out = r.read()
                 return out if raw else json.loads(out.decode() or "{}")
         except urllib.error.HTTPError as e:
-            txt = e.read().decode("utf-8", "replace")
+            txt, status = e.read().decode("utf-8", "replace"), ""
             try:
                 j = json.loads(txt)
                 d = j.get("detail", j)
+                if isinstance(d, dict):
+                    status = str(d.get("status") or d.get("code") or "")
                 txt = d.get("message") if isinstance(d, dict) and d.get("message") else json.dumps(d)
             except ValueError:
                 pass
@@ -115,12 +159,59 @@ def http(method, path, body=None, key=None, raw=False, retries=2):
                 continue
             hint = {401: " (invalid key or key lacks this permission)", 402: " (needs a paid plan / credits)",
                     403: " (forbidden: plan or key permission)", 422: " (bad request parameters)", 429: " (rate/concurrency limit)"}.get(e.code, "")
-            raise ApiError("ElevenLabs HTTP %d%s: %s" % (e.code, hint, txt[:500]), e.code)
+            raise ApiError("ElevenLabs HTTP %d%s: %s" % (e.code, hint, txt[:500]), e.code, status)
         except urllib.error.URLError as e:
             if attempt < retries:
                 time.sleep(2)
                 continue
             raise ApiError("network error: %s" % e.reason)
+
+
+def http(method, path, body=None, key=None, raw=False, retries=2, quiet=False):
+    """One API call. When the key is refused (401/402/403) the next held key is tried; a key refused for credits or
+    validity is skipped for the rest of the run. Raises the last refusal when every key has been tried."""
+    url = path if path.startswith("http") else API + path
+    data = json.dumps(body).encode() if body is not None else None
+    pool = [k for k, _ in all_keys()]
+    if key in _DEAD:
+        key = get_key()
+    order = ([key] if key else []) + [k for k in pool if k != key and k not in _DEAD]
+    last = None
+    for i, k in enumerate(order):
+        try:
+            out = _http1(method, url, data, k, raw, retries)
+            if i and not quiet:
+                print("keys: %s worked" % mask(k), file=sys.stderr)
+            return out
+        except ApiError as e:
+            if e.code not in (401, 402, 403) or k not in pool:
+                raise
+            last = e
+            dead = e.code == 402 or any(s in (e.status + " " + str(e)).lower() for s in DEAD_STATUS + ("exceeds your quota",))
+            if dead:
+                _DEAD.add(k)
+            nxt = next((x for x in order[i + 1:] if x not in _DEAD), None)
+            if not quiet:
+                print("keys: %s refused (%s%s)%s" % (mask(k), e.status or "HTTP %d" % e.code, ", skipped for this run" if dead else "",
+                      "; trying %s" % mask(nxt) if nxt else "; no other key left"), file=sys.stderr)
+    raise last
+
+
+def cmd_keys(a):
+    ks = all_keys()
+    if not ks:
+        die(NOKEY, 3)
+    for i, (k, src) in enumerate(ks):
+        line = "key #%d  ...%s  %s" % (i + 1, k[-4:], src)
+        try:
+            sub = _http1("GET", API + "/v1/user/subscription", None, k, False, 1)
+            used, lim = sub.get("character_count", 0), sub.get("character_limit", 0)
+            reset = sub.get("next_character_count_reset_unix")
+            when = time.strftime("%Y-%m-%d", time.localtime(reset)) if reset else "?"
+            line += "  %s  %d / %d credits left, resets %s" % (sub.get("tier", "?"), max(0, lim - used), lim, when)
+        except ApiError as e:
+            line += "  credits unknown (%s)" % (e.status or "HTTP %s" % e.code)
+        print(line)
 
 
 def write(path, data):
@@ -136,7 +227,7 @@ def jwrite(path, obj):
 
 # ---------------------------------------------------------------- voices
 def list_voices(key):
-    return http("GET", "/v1/voices", key=key).get("voices", [])
+    return http("GET", "/v1/voices", key=key, quiet=True).get("voices", [])
 
 
 # ElevenLabs premade voices (stable public IDs) - used when the key cannot list voices (no voices_read permission)
@@ -898,6 +989,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
     sp.add_parser("voices")
+    sp.add_parser("keys")
     for n in ("vo", "vo-local"):
         p = sp.add_parser(n)
         p.add_argument("--text"); p.add_argument("--script"); p.add_argument("--out", required=True); p.add_argument("--voice")
@@ -938,7 +1030,7 @@ def main():
 
 
 def run(a):
-    {"voices": cmd_voices, "vo": cmd_vo, "sfx": cmd_sfx, "music": cmd_music, "vo-local": cmd_vo_local, "refine": cmd_refine, "split": cmd_split,
+    {"voices": cmd_voices, "keys": cmd_keys, "vo": cmd_vo, "sfx": cmd_sfx, "music": cmd_music, "vo-local": cmd_vo_local, "refine": cmd_refine, "split": cmd_split,
      "sfx-norm": cmd_sfx_norm, "music-check": cmd_music_check, "music-fit": cmd_music_fit}[a.cmd](a)
 
 
