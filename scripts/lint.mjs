@@ -3,8 +3,9 @@
 //
 // Usage:  node lint.mjs <index.html> [--times 0.5,2,4.2] [--samples N] [--json] [--width W --height H] [--duration S]
 //
-// Loads the page in headless Chrome (scripts/_cdp.mjs), seeks it with the same contract as render.mjs (__seek / __timelines /
-// gsap), and at every sample time reads every VISIBLE text block (box = real ink box of the text, font size, tracking, case,
+// Loads the page in headless Chrome (scripts/_cdp.mjs), seeks it with the same timeline contract as render.mjs (__seek /
+// __timelines / gsap) - it does not reproduce render.mjs's <video> handling, which this tool has no need of, and
+// at every sample time it reads every VISIBLE text block (box = real ink box of the text, font size, tracking, case,
 // colour, alignment) plus the non-text shapes (bars, rules, dots, media). Each position rule is read twice (t and t+0.1 s) and
 // only counts when the element is HELD (not flying through a corner mid-transition). Text INSIDE a UI surface (an ancestor with a
 // background + border-radius that is at least ~2.5% of the frame, or any [data-ui] element) is exempt from the chrome/deck
