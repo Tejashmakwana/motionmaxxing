@@ -25,6 +25,7 @@
 //   --grain 0.03        film grain after the average: deterministic seeded luma noise (0-0.2; 0.03-0.06 only on gradient / photo / 3D
 //                       films, it kills banding; ffmpeg noise strength = grain x 100, same seed => same bytes). Works without --shutter.
 //   --grain-seed 7      seed for --grain (default 7)
+//   --no-skip-hidden    seek <video>s that are hidden too (needed only when a hidden one feeds a canvas/WebGL texture)
 //
 // Events: if the page exposes window.__events = [{t, frame, type, label}, ...] (cuts, shows, hides, hits - filled by the
 // composition while it is seeked, or up front), it is read AFTER rendering and written to <out>.events.json beside the MP4
@@ -36,7 +37,11 @@
 //   2. window.__timelines = {name: tl, ...}  paused GSAP timelines; each is seeked, "main" last
 //   3. gsap.globalTimeline                   paused + seeked
 //   Always also: CSS/WAAPI animations (document.getAnimations) are paused and set to t*1000 ms,
-//   <video> gets currentTime = t - data-start (+ data-media-start) and we await 'seeked'; <audio>/<video> are muted.
+//   <video> gets currentTime = t - data-start (+ data-media-start) and we await 'seeked' and the next presented
+//   frame; <audio>/<video> are muted. A <video> hidden by display/visibility/opacity/content-visibility is NOT
+//   seeked: it cannot paint, so it cannot change the frame - unless it is only a pixel source for a canvas or a
+//   WebGL texture, which --no-skip-hidden is for. REQUIRES that __seek has applied visibility by the time it
+//   resolves (a __seek that defers its DOM commit to a rAF or a framework render would be read one frame late).
 // Duration: --duration | window.__duration | [data-composition-id=main][data-duration] | __timelines.main.duration() | gsap global.
 // Before the first frame we wait for: load, document.fonts.ready, <img> decode, video metadata, window.__ready (promise).
 // Exit codes: 0 ok, 1 failure. Console errors from the page are listed at the end (they do not fail the render).
@@ -50,6 +55,7 @@ const HELP = helpFrom(import.meta.url);
 const { pos, opt } = parseArgs(process.argv.slice(2), {
   help: 'bool', fps: 's', width: 's', height: 's', from: 's', to: 's', duration: 's', audio: 's', crf: 's',
   preset: 's', scale: 's', format: 's', still: 's', shutter: 's', subframes: 's', grain: 's', 'grain-seed': 's',
+  'no-skip-hidden': 'bool',
 });
 if (opt.help || pos.length < 1) { console.log(HELP); process.exit(opt.help ? 0 : 1); }
 
@@ -105,6 +111,16 @@ const PAGE_LIB = `(() => {
       width: main ? parseInt(main.getAttribute('data-width')) || null : null, height: main ? parseInt(main.getAttribute('data-height')) || null : null,
       videos: vids().length };
   };
+  window.__mdSkipped = 0;
+  if (window.__mdSkipHidden === undefined) window.__mdSkipHidden = true;
+  const skipTally = new Map();
+  window.__mdSkipTally = (v, skipped) => {
+    const k = v.id || v.currentSrc || v.src || '<video>';
+    const e = skipTally.get(k) || { seen: 0, skipped: 0 };
+    e.seen++; if (skipped) e.skipped++; skipTally.set(k, e);
+  };
+  // every capture skipped => the video never appeared (harmless) or it is a pixel source (broken render)
+  window.__mdAlwaysSkipped = () => [...skipTally].filter(([, e]) => e.seen > 0 && e.skipped === e.seen).map(([k]) => k);
   window.__mdFrame = async (t) => {
     if (typeof window.__seek === 'function') { await window.__seek(t); }
     else if (window.__timelines && typeof window.__timelines === 'object' && Object.keys(window.__timelines).length) {
@@ -121,8 +137,37 @@ const PAGE_LIB = `(() => {
       const dur = isFinite(v.duration) ? v.duration : 1e9;
       const target = Math.min(Math.max(0, t - (parseFloat(v.dataset.start) || 0) + (parseFloat(v.dataset.mediaStart) || 0)), Math.max(0, dur - 0.001));
       if (Math.abs(v.currentTime - target) < 0.0005 && !v.seeking) return;
+      // A video that cannot be seen cannot paint, so skip its seek while display/visibility/opacity (or
+      // content-visibility, which checkVisibility always applies) hides it on itself or an ancestor. It seeks
+      // normally on the frame it reappears: currentTime is stale by then, so the early return above does not fire.
+      // Films that cross-cut between tracks seek far less for it. The legacy option spellings are passed too, so
+      // this still works on the Chromes that shipped checkVisibility before the options were renamed.
+      // NOT safe for a hidden video that is only a PIXEL SOURCE (canvas drawImage, a WebGL/VideoTexture upload):
+      // it paints nothing itself, so it would freeze at frame 0. Pass --no-skip-hidden for those; a video skipped
+      // on every single capture is reported at the end, because that is what this mistake looks like.
+      if (window.__mdSkipHidden && v.checkVisibility && !v.checkVisibility({ opacityProperty: true, visibilityProperty: true, checkOpacity: true, checkVisibilityCSS: true })) {
+        window.__mdSkipped++; window.__mdSkipTally(v, true); return;
+      }
+      window.__mdSkipTally(v, false);
+      // Register the frame callback BEFORE the seek, so the presentation the seek itself causes is not missed.
+      // Registered after 'seeked' (as this was) that presentation has usually already happened, the callback never
+      // fires, and only the fallback timer ends the wait - which is why the fallback was reached on most captures
+      // instead of being the rare safety net it reads as.
+      let rvfcFired = false, rvfcId = null;
+      const presented = v.requestVideoFrameCallback
+        ? new Promise((r) => { rvfcId = v.requestVideoFrameCallback(() => { rvfcFired = true; r(); }); })
+        : null;
       await new Promise((res) => { const to = setTimeout(res, 3000); v.addEventListener('seeked', () => { clearTimeout(to); res(); }, { once: true }); v.currentTime = target; });
-      if (v.requestVideoFrameCallback) await new Promise((r) => { const to = setTimeout(r, 150); v.requestVideoFrameCallback(() => { clearTimeout(to); r(); }); });
+      // The 150ms budget starts HERE, after 'seeked', exactly as it did before: it is correctness margin for a
+      // frame that really is late, not a frame budget, so it must not scale with --fps and must not be spent on
+      // the seek itself. Starting it before the seek would leave a seek slower than 150ms with no margin at all -
+      // and skipping hidden videos makes multi-second jump-seeks normal on the frame a track reappears, which is
+      // the one frame where a stale video reads as a bad cut. Cancel on timeout: a presentation arriving later
+      // would otherwise resolve the NEXT capture's wait early, before its own seek had finished.
+      if (presented) await Promise.race([presented, new Promise((r) => setTimeout(() => {
+        if (!rvfcFired && rvfcId != null) { try { v.cancelVideoFrameCallback(rvfcId); } catch (e) {} }
+        r();
+      }, 150))]);
     }));
     await raf2();
     return true;
@@ -133,23 +178,48 @@ const PAGE_LIB = `(() => {
 // ---- main ----------------------------------------------------------------------------------
 const errors = new Map();
 const addErr = (s) => { s = String(s).slice(0, 300); errors.set(s, (errors.get(s) || 0) + 1); };
-let browser, ff;
+let browser, ff, page;
 const cleanup = async () => { try { await browser?.close(); } catch {} };
 
 (async () => {
-  browser = await launchChrome({ args: ['--allow-file-access-from-files'] });
+  // --disable-frame-rate-limit: an offline frame-by-frame render has no display to stay in step with, but Chrome
+  // still paces rAF and screenshot capture to a 60Hz vsync, so every capture waits out part of a frame interval
+  // for nothing. Measured on a 1080p film: the two rAFs that settle the compositor 25ms -> 12ms and
+  // Page.captureScreenshot 51ms -> 34ms. It changes WHEN frames are composited, not what: every <video> is
+  // paused and seeked explicitly, so no video presentation depends on wall-clock pacing. Byte-identical output
+  // (equal md5 of the decoded RGB over several ranges). A film that drives itself from its own rAF loop instead
+  // of the seek contract would render differently - but such a film is already wall-clock nondeterministic.
+  browser = await launchChrome({ args: ['--allow-file-access-from-files', '--disable-frame-rate-limit'] });
   // Probe size with a first load at 1920x1080 only if user gave none and page declares data-width/height.
   let W = opt.width ? num(opt.width, 0, 'width') : null, H = opt.height ? num(opt.height, 0, 'height') : null;
-  const page = await browser.newPage({ width: W || 1920, height: H || 1080, scale });
+  page = await browser.newPage({ width: W || 1920, height: H || 1080, scale });
   await page.send('Log.enable');
   page.on('Runtime.exceptionThrown', (p) => addErr('exception: ' + (p.exceptionDetails?.exception?.description || p.exceptionDetails?.text || '').split('\n')[0]));
   page.on('Runtime.consoleAPICalled', (p) => { if (p.type === 'error') addErr('console.error: ' + (p.args || []).map((a) => a.value ?? a.description ?? '').join(' ')); });
   page.on('Log.entryAdded', (p) => { if (p.entry.level === 'error') addErr(`${p.entry.source}: ${p.entry.text} ${p.entry.url || ''}`); });
   page.on('Page.javascriptDialogOpening', () => page.send('Page.handleJavaScriptDialog', { accept: true }).catch(() => {}));
 
+  // Prove once that this Chrome honours the checkVisibility options the hidden-video skip relies on. WebIDL drops
+  // an unknown dictionary member silently, so a typo or an older Chrome would disable the skip for ever without a
+  // word. Done HERE, on the about:blank this page still holds: the navigation below replaces this document, so the
+  // film is never touched (appending even an opacity:0 div to the film's own body changed one rendered frame), and
+  // it needs no second target. A failure here only costs the optimization, so it must never fail the render.
+  let skipHidden = !opt['no-skip-hidden'];
+  if (skipHidden) {
+    try {
+      skipHidden = await page.eval(`(() => { const d = document.createElement('div'); d.style.opacity = '0';
+        const h = document.createElement('div'); h.style.visibility = 'hidden';
+        document.body.append(d, h);
+        return !!(d.checkVisibility && !d.checkVisibility({ opacityProperty: true, visibilityProperty: true, checkOpacity: true, checkVisibilityCSS: true })
+                               && !h.checkVisibility({ opacityProperty: true, visibilityProperty: true, checkOpacity: true, checkVisibilityCSS: true })); })()`, { timeout: 10000 });
+    } catch { skipHidden = false; }
+    if (!skipHidden) console.error("warn: this Chrome ignores checkVisibility's opacity/visibility options; seeking hidden videos too");
+  }
+
   const loaded = await page.goto(url, { timeout: 45000 });
   if (!loaded) console.error('warn: load event timed out, continuing');
   await page.eval(PAGE_LIB);
+  if (!skipHidden) await page.eval('window.__mdSkipHidden = false');
   const prep = await page.eval('window.__mdPrepare()', { timeout: 60000 });
   for (const p of prep) addErr(p);
   const info = await page.eval('window.__mdInfo()');
@@ -159,7 +229,8 @@ const cleanup = async () => { try { await browser?.close(); } catch {} };
   if (info.strategy === 'none') console.error('warn: no seek mechanism found (__seek / __timelines / gsap) - frames will be a static page');
   await page.eval('window.__mdFrame(0)'); // settle at t=0 once
 
-  const grab = async (t) => { await page.eval(`window.__mdFrame(${t})`, { timeout: 30000 }); return page.shot({ format: stillMode ? 'png' : format, quality: 92 }); };
+  // fast: only for frames piped into ffmpeg, never for a still that is kept on disk (see shot()).
+  const grab = async (t) => { await page.eval(`window.__mdFrame(${t})`, { timeout: 30000 }); return page.shot({ format: stillMode ? 'png' : format, quality: 92, fast: !stillMode }); };
 
   // window.__events -> JSON file (read after seeking, so events registered lazily by the timeline are included)
   const saveEvents = async (file) => {
@@ -237,6 +308,14 @@ const cleanup = async () => { try { await browser?.close(); } catch {} };
   await saveEvents(outFile + '.events.json');
 })().catch((e) => { console.error('error: ' + e.message); process.exitCode = 1; })
   .finally(async () => {
+    try {
+      const n = await page?.eval('window.__mdSkipped|0', { timeout: 2000 });
+      if (n > 0) console.error(`skipped ${n} seeks of hidden videos (--no-skip-hidden to seek them anyway)`);
+      const always = await page?.eval('JSON.stringify(window.__mdAlwaysSkipped ? window.__mdAlwaysSkipped() : [])', { timeout: 2000 });
+      const list = always ? JSON.parse(always) : [];
+      if (list.length) console.error(`warn: never seeked (hidden on every capture): ${list.join(', ')}\n`
+        + '      harmless if it never appears; if it feeds a canvas or a WebGL texture it froze at frame 0 - use --no-skip-hidden');
+    } catch {}
     if (errors.size) { console.error(`\npage console errors (${errors.size} distinct):`); [...errors].slice(0, 20).forEach(([k, v]) => console.error(`  ${v > 1 ? `[x${v}] ` : ''}${k}`)); }
     try { ff?.kill(); } catch {}
     await cleanup();

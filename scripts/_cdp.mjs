@@ -148,8 +148,17 @@ export async function launchChrome({ args = [], width = 1920, height = 1080, hea
         if (r.errorText) throw new Error(`navigation failed: ${r.errorText} (${url})`);
         return loaded; // false = load event timed out (page may still be usable)
       },
-      async shot({ format = 'png', quality = 90, clip, beyond = false } = {}) {
-        const r = await send('Page.captureScreenshot', { format, ...(format === 'jpeg' ? { quality } : {}), ...(clip ? { clip } : {}), captureBeyondViewport: beyond }, 60000);
+      // optimizeForSpeed trades the PNG encoder's compression effort for time: measured on a 1080p capture,
+      // 217ms -> 85ms, for a file 1.6x larger. PNG is lossless either way, so the decoded pixels are identical
+      // (verified: --format png renders byte-identical with and without it). A no-op for jpeg, which is the
+      // default frame transport, so this only speeds up --format png. Passed only when the caller asks, which
+      // the video-frame path does and the paths that WRITE a png - a still, a brand shot - do not: those are
+      // kept, so their size matters and their encode time does not.
+      async shot({ format = 'png', quality = 90, clip, beyond = false, fast = false } = {}) {
+        const r = await send('Page.captureScreenshot', {
+          format, ...(format === 'jpeg' ? { quality } : {}), ...(clip ? { clip } : {}),
+          captureBeyondViewport: beyond, ...(fast && format === 'png' ? { optimizeForSpeed: true } : {}),
+        }, 60000);
         return Buffer.from(r.data, 'base64');
       },
       close: () => cdp.send('Target.closeTarget', { targetId }).catch(() => {}),
