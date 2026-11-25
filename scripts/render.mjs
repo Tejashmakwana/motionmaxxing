@@ -182,7 +182,14 @@ let browser, ff, page;
 const cleanup = async () => { try { await browser?.close(); } catch {} };
 
 (async () => {
-  browser = await launchChrome({ args: ['--allow-file-access-from-files'] });
+  // --disable-frame-rate-limit: an offline frame-by-frame render has no display to stay in step with, but Chrome
+  // still paces rAF and screenshot capture to a 60Hz vsync, so every capture waits out part of a frame interval
+  // for nothing. Measured on a 1080p film: the two rAFs that settle the compositor 25ms -> 12ms and
+  // Page.captureScreenshot 51ms -> 34ms. It changes WHEN frames are composited, not what: every <video> is
+  // paused and seeked explicitly, so no video presentation depends on wall-clock pacing. Byte-identical output
+  // (equal md5 of the decoded RGB over several ranges). A film that drives itself from its own rAF loop instead
+  // of the seek contract would render differently - but such a film is already wall-clock nondeterministic.
+  browser = await launchChrome({ args: ['--allow-file-access-from-files', '--disable-frame-rate-limit'] });
   // Probe size with a first load at 1920x1080 only if user gave none and page declares data-width/height.
   let W = opt.width ? num(opt.width, 0, 'width') : null, H = opt.height ? num(opt.height, 0, 'height') : null;
   page = await browser.newPage({ width: W || 1920, height: H || 1080, scale });
@@ -222,7 +229,8 @@ const cleanup = async () => { try { await browser?.close(); } catch {} };
   if (info.strategy === 'none') console.error('warn: no seek mechanism found (__seek / __timelines / gsap) - frames will be a static page');
   await page.eval('window.__mdFrame(0)'); // settle at t=0 once
 
-  const grab = async (t) => { await page.eval(`window.__mdFrame(${t})`, { timeout: 30000 }); return page.shot({ format: stillMode ? 'png' : format, quality: 92 }); };
+  // fast: only for frames piped into ffmpeg, never for a still that is kept on disk (see shot()).
+  const grab = async (t) => { await page.eval(`window.__mdFrame(${t})`, { timeout: 30000 }); return page.shot({ format: stillMode ? 'png' : format, quality: 92, fast: !stillMode }); };
 
   // window.__events -> JSON file (read after seeking, so events registered lazily by the timeline are included)
   const saveEvents = async (file) => {
