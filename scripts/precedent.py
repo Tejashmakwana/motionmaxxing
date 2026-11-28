@@ -44,8 +44,36 @@ BEAT_ALIAS = {"problem": "hook", "claim": "hook", "tension": "turn", "name-revea
               "demo": "proof", "feature": "proof", "number": "proof", "list": "proof", "lockup": "cta"}
 CONTENT_ALIAS = {"product-ui": "ui", "screen": "ui", "word": "type", "phrase": "type", "sentence": "type", "question": "type", "text": "type", "typography": "type",
                  "counter": "number", "stat": "number", "mark": "logo", "wordmark": "logo", "three-d": "3d", "abstract-idea": "abstract", "none": "abstract", "person": "photo"}
-TOK = re.compile(r"[a-z0-9]+")
-STOP = set("the a an and or of to in on for with is are be it this that you your we our i my at by as from into than then when do does not no".split())
+TOK = re.compile(r"[a-z0-9\u0621-\u064a]+")
+AR_DIACRITICS = re.compile(r"[\u064B-\u065F\u0670\u0640]")
+AR_CONCEPTS = {
+    "شعار": ["logo", "mark", "wordmark"],
+    "واجهة": ["ui", "screen", "interface"],
+    "واجهه": ["ui", "screen", "interface"],
+    "مؤشر": ["cursor", "click", "press"],
+    "فأرة": ["cursor", "click", "press"],
+    "نقر": ["click", "press", "button"],
+    "نص": ["type", "word", "headline", "typography"],
+    "كتابة": ["type", "typing", "caret", "input"],
+    "عنوان": ["headline", "title", "type"],
+    "قطع": ["cut", "hard", "transition"],
+    "انتقال": ["transition", "handoff", "cut"],
+    "خاتمة": ["cta", "lockup", "end", "close"],
+    "دعوة": ["cta", "lockup", "button"],
+    "إثبات": ["proof", "demo", "ui"],
+    "اثبات": ["proof", "demo", "ui"],
+    "خطاف": ["hook", "claim", "opening"],
+    "بداية": ["hook", "entry", "arrive"],
+    "تحول": ["turn", "contrast", "reveal"],
+    "ثلاثي": ["3d", "extrude", "depth"],
+    "رقم": ["number", "count", "counter", "stat"],
+    "عداد": ["count", "counter", "number"],
+    "كاميرا": ["camera", "zoom", "push", "macro"],
+    "تكبير": ["zoom", "macro", "scale", "camera"],
+    "تلاشي": ["fade", "opacity"],
+    "حركة": ["motion", "move", "ease", "decel"],
+}
+STOP = set("the a an and or of to in on for with is are be it this that you your we our i my at by as from into than then when do does not no من في على إلى عن مع هذا هذه التي الذي".split())
 
 
 def die(msg, code=2):
@@ -54,7 +82,14 @@ def die(msg, code=2):
 
 
 def toks(s):
-    return [t for t in TOK.findall((s or "").lower()) if t not in STOP and len(t) > 1]
+    cleaned = AR_DIACRITICS.sub("", (s or "").lower())
+    raw = [t for t in TOK.findall(cleaned) if t not in STOP and len(t) > 1]
+    expanded = list(raw)
+    for t in raw:
+        for k, vals in AR_CONCEPTS.items():
+            if k in t or t in k:
+                expanded.extend(vals)
+    return expanded
 
 
 def load(path):
