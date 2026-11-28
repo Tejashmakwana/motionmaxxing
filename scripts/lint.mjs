@@ -218,13 +218,14 @@ const fsPct = (b) => +(b.fs * 100).toFixed(1);
 const ZINC = [[0xd4, 0xd4, 0xd8], [0xa1, 0xa1, 0xaa], [0x71, 0x71, 0x7a], [0x52, 0x52, 0x5b]];
 const near = (c, k, d) => Math.hypot(c[0] - k[0], c[1] - k[1], c[2] - k[2]) <= d;
 const RX = {
-  counterNum: /^\s*0?\d{1,2}\s*(?:[\/—–·]|-(?=\s*[A-Za-z]{3,}))\s*(?:0?\d{1,2}\b|[A-Za-z]{3,})/,
-  counterWord: /\b(chapter|scene|act|step|part|film|episode|shot|take|bar|beat)\s*0?\d/i,
-  counterBare: /^\s*0\d\s*$/,
+  counterNum: /^\s*0?[\d٠-٩]{1,2}\s*(?:[\/—–·]|-(?=\s*[\p{L}]{2,}))\s*(?:0?[\d٠-٩]{1,2}\b|[\p{L}]{2,})/u,
+  counterWord: /(?:^|\s)(chapter|scene|act|step|part|film|episode|shot|take|bar|beat|الفصل|المشهد|الخطوة|خطوة|القسم|الجزء|اللقطة)\s*0?[\d٠-٩]/iu,
+  counterBare: /^\s*0[\d٠-٩]\s*$/u,
   meta: /\bBPM\b|\bFPS\b|\bFRAME\s*\d|\b(1920|3840|1280)\s*[x×]\s*(1080|2160|720)\b|\bT\s*[+]\s*\d|\bTC\b|\b\d{1,2}:\d{2}:\d{2}(?:[.:]\d+)?\b|\b\d{1,2}:\d{2}\.\d{1,3}\b|\bREC\b/,
   ver: /\bv\d+\.\d+(?:\.\d+)?\b|©/i,
-  greeting: /\bgood\s+(morning|afternoon|evening)\b|\bwelcome back\b|^(hi|hey|hello)\b[^.,]{0,24}(!|\u{1F44B}|\u{1F31E}|\u2600)/iu,
-  labelValue: /^[A-Za-z][A-Za-z ]{2,24}\s*[·•]\s*[$€£]?\s?\d[\d,.]*\s?[kKmMbB%]?/,
+  greeting: /\bgood\s+(morning|afternoon|evening)\b|\bwelcome back\b|^(hi|hey|hello)\b[^.,]{0,24}(!|\u{1F44B}|\u{1F31E}|\u2600)|(?:صباح|مساء)\s+(?:الخير|النور)|مرحبا[ً]?\s+بعودتك|أهلا[ً]?\s+بك/iu,
+  labelValue: /^[\p{L}][\p{L} ]{1,28}\s*[·•]\s*[$€£﷼]?\s?[\d٠-٩][\d٠-٩,.]*\s?(?:[kKmMbB%]|ألف|مليون|ريال|درهم|دولار)?/u,
+  bidi: /[\u202a-\u202e\u2066-\u2069]/,
 };
 
 function evalSample(t, A, B, hits) {
@@ -245,7 +246,7 @@ function evalSample(t, A, B, hits) {
     const stab = stable(b);
     const corner = (cx < 0.2 || cx > 0.8) && (cy < 0.14 || cy > 0.86), edge = b.y1 < 0.07 || b.y0 > 0.93 || b.x1 < 0.05 || b.x0 > 0.95;
     if (small && stab && (corner || edge)) addHit('C1', t, b.text, d);
-    if (b.up && b.ls >= 0.05 && b.fs <= 0.045 && b.text.replace(/[^A-Za-z]/g, '').length >= 2) addHit('C2', t, b.text, { ...d, note: 'letter-spacing ' + b.ls.toFixed(2) + 'em' });
+    if ((b.up && b.ls >= 0.05 && b.fs <= 0.045 && b.text.replace(/[^A-Za-z]/g, '').length >= 2) || (b.ls > 0.01 && /[\u0600-\u06FF]/.test(b.text))) addHit('C2', t, b.text, { ...d, note: 'letter-spacing ' + b.ls.toFixed(2) + 'em' });
     if (b.fs <= 0.06 && (RX.counterNum.test(b.text) || RX.counterWord.test(b.text) || (b.fs <= 0.05 && RX.counterBare.test(b.text))) && !/^\s*24\s*\/\s*7\b/.test(b.text)) addHit('C3', t, b.text, d);
     if ((RX.meta.test(b.text) && b.fs <= 0.06) || (RX.ver.test(b.text) && b.fs <= 0.04)) addHit('C4', t, b.text, d);
     if (b.mono && small) addHit('C5', t, b.text, d);
@@ -271,20 +272,24 @@ function evalSample(t, A, B, hits) {
     if (a === b || !(a.fs <= 0.04) || !(b.fs >= a.fs * 2 && b.fs >= 0.05)) continue;
     const gap = b.y0 - a.y1; if (!(gap < 0.06 && gap > -0.01)) continue;
     const ax = (a.x0 + a.x1) / 2, bx = (b.x0 + b.x1) / 2;
-    if (!(Math.abs(a.x0 - b.x0) < 0.02 || Math.abs(ax - bx) < 0.02) || !stable(a) || !stable(b)) continue;
+    if (!(Math.abs(a.x0 - b.x0) < 0.02 || Math.abs(a.x1 - b.x1) < 0.02 || Math.abs(ax - bx) < 0.02) || !stable(a) || !stable(b)) continue;
     kickers.set(b.id, a);
     addHit('C7', t, a.text + '>' + b.text, { text: a.text + '  over  ' + b.text, snippet: a.snip + ' over ' + b.snip, bbox: bb({ x0: Math.min(a.x0, b.x0), y0: a.y0, x1: Math.max(a.x1, b.x1), y1: b.y1 }), fs: fsPct(b) });
   }
   const mediaR = (h) => shapes.find((s) => { const ar = (s.x1 - s.x0) * (s.y1 - s.y0), cx = (s.x0 + s.x1) / 2; return (s.media || s.selfSurface) && ar >= 0.04 && ar <= 0.7 && cx > 0.5 && s.x0 > h.x1 - 0.05 && s.y1 > h.y0 && s.y0 < h.y1 + 0.2; });
+  const mediaL = (h) => shapes.find((s) => { const ar = (s.x1 - s.x0) * (s.y1 - s.y0), cx = (s.x0 + s.x1) / 2; return (s.media || s.selfSurface) && ar >= 0.04 && ar <= 0.7 && cx < 0.5 && s.x1 < h.x0 + 0.05 && s.y1 > h.y0 && s.y0 < h.y1 + 0.2; });
   for (const b of free) {
-    if (!(b.fs >= 0.05 && b.fs >= 0.85 * maxFs && b.x0 < 0.2 && b.x0 >= 0.02 && b.x1 < 0.78 && b.ta !== 'center' && Math.abs((b.x0 + b.x1) / 2 - 0.5) > 0.06 && stable(b))) continue;
+    const isLeftDeck = b.x0 < 0.2 && b.x0 >= 0.02 && b.x1 < 0.78;
+    const isRightDeck = b.x1 > 0.8 && b.x1 <= 0.98 && b.x0 > 0.22 && /[\u0600-\u06FF]/.test(b.text);
+    if (!(b.fs >= 0.05 && b.fs >= 0.85 * maxFs && (isLeftDeck || isRightDeck) && b.ta !== 'center' && Math.abs((b.x0 + b.x1) / 2 - 0.5) > 0.06 && stable(b))) continue;
     const ev = [];
-    const sub = free.find((c) => c !== b && c.fs >= 0.02 && c.fs <= 0.6 * b.fs && c.y0 - b.y1 > -0.005 && c.y0 - b.y1 < 0.08 && Math.abs(c.x0 - b.x0) < 0.03);
+    const sub = free.find((c) => c !== b && c.fs >= 0.02 && c.fs <= 0.6 * b.fs && c.y0 - b.y1 > -0.005 && c.y0 - b.y1 < 0.08 && (Math.abs(c.x0 - b.x0) < 0.03 || Math.abs(c.x1 - b.x1) < 0.03));
     if (sub) ev.push('sub-line "' + sub.text.slice(0, 30) + '"');
     if (kickers.has(b.id)) ev.push('kicker "' + kickers.get(b.id).text.slice(0, 30) + '"');
-    const m = mediaR(b); if (m) ev.push('media on the right ' + m.snip);
+    const m = isLeftDeck ? mediaR(b) : mediaL(b); if (m) ev.push((isLeftDeck ? 'media on the right ' : 'media on the left ') + m.snip);
     if (b.lines >= 2) ev.push(b.lines + ' lines');
-    addHit('D1', t, b.text, { text: b.text, snippet: b.snip, bbox: bb(b), fs: fsPct(b), sev: ev.length ? 'FAIL' : 'WARN', note: ev.length ? 'left-anchored headline with ' + ev.join(', ') : 'left-anchored single-line headline (ok only as a split phrase under ~1.2 s)' });
+    const sideLabel = isRightDeck ? 'right-anchored RTL' : 'left-anchored';
+    addHit('D1', t, b.text, { text: b.text, snippet: b.snip, bbox: bb(b), fs: fsPct(b), sev: ev.length ? 'FAIL' : 'WARN', note: ev.length ? sideLabel + ' headline with ' + ev.join(', ') : sideLabel + ' single-line headline (ok only as a split phrase under ~1.2 s)' });
   }
   // V3 status dots: a filled circle 6-14 px (at 1080p) with text right after it
   for (const s of shapes) {

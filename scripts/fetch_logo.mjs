@@ -36,7 +36,8 @@ async function get(url, kind = 'text') {
     return kind === 'json' ? await r.json() : kind === 'buf' ? Buffer.from(await r.arrayBuffer()) : await r.text();
   } catch { return null; }
 }
-const norm = (s) => String(s).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]/g, '');
+const norm = (s) => String(s).toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]/gu, '');
+const normAscii = (s) => String(s).toLowerCase().normalize('NFKD').replace(/[^a-z0-9]/g, '');
 const validSvg = (s) => typeof s === 'string' && /<svg[\s>]/i.test(s) && !/<image[\s>]/i.test(s) && (/viewBox=/i.test(s) || /width=/i.test(s)) && s.length < 400000;
 const found = { brand, domain, files: [], note: 'Trademark: nominative use only (identify the brand), unmodified official artwork, never recoloured, redrawn or presented as the film\'s own mark.' };
 const has = (f) => fs.existsSync(path.join(out, f));
@@ -44,9 +45,11 @@ const save = (file, svg, meta) => { fs.writeFileSync(path.join(out, file), svg.t
 
 // 1. SVGL
 async function svgl() {
+  const nb = norm(brand);
+  if (!nb) return false;
   const res = await get(`https://api.svgl.app?search=${encodeURIComponent(brand)}`, 'json');
   if (!Array.isArray(res) || !res.length) return false;
-  const pick = res.find((r) => norm(r.title) === norm(brand)) || res.find((r) => norm(r.title).includes(norm(brand))) || null;
+  const pick = res.find((r) => norm(r.title) && norm(r.title) === nb) || res.find((r) => norm(r.title) && norm(r.title).includes(nb)) || null;
   if (!pick) return false;                                            // never guess: a loose first hit can be a different company
   const pickUrl = (x, dark) => (typeof x === 'string' ? x : x && ((dark ? x.dark : x.light) || x.light || x.dark));
   const markUrl = pickUrl(pick.route, true), wordUrl = pickUrl(pick.wordmark, true), lightUrl = pickUrl(pick.route, false);
@@ -59,11 +62,13 @@ async function svgl() {
 }
 // 2. Simple Icons (single-colour mark + official brand hex)
 async function simpleIcons() {
-  const slugs = [opt.slug, norm(brand), norm(brand.replace(/\s+(ai|inc|labs?|app)$/i, '')), norm(brand.split(' ')[0])].filter(Boolean);
+  const nb = normAscii(brand);
+  if (!nb && !opt.slug) return false;
+  const slugs = [opt.slug, nb, normAscii(brand.replace(/\s+(ai|inc|labs?|app)$/i, '')), normAscii(brand.split(' ')[0])].filter(Boolean);
   const data = await get('https://cdn.jsdelivr.net/npm/simple-icons@latest/data/simple-icons.json', 'json')
             || await get('https://cdn.jsdelivr.net/npm/simple-icons@latest/_data/simple-icons.json', 'json');
   const list = Array.isArray(data) ? data : data?.icons || [];
-  const entry = list.find((e) => norm(e.title) === norm(brand)) || list.find((e) => slugs.includes(e.slug || norm(e.title)));
+  const entry = list.find((e) => nb && normAscii(e.title) === nb) || list.find((e) => slugs.includes(e.slug || normAscii(e.title)));
   if (entry?.hex) found.color = '#' + entry.hex;
   if (entry?.guidelines) found.guidelines = entry.guidelines;
   for (const s of [entry?.slug, ...slugs].filter(Boolean)) {

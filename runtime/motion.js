@@ -322,9 +322,18 @@ function film(cfg) {
       const a = accOf(i);
       if (a && a.color) tw(s, 'color', a.color, getComputedStyle(s).color, on[i], on[i] + (a.frames || 20), 'softInOut');   // accent on arrival, settles to ink
     });
-    if (!fixed && n > 1) {                                           // keep the visible line centred: measure once, glide the line x
+    if (!fixed && n > 1) {                                           // keep the visible line centred (LTR and RTL safe): measure once, glide the line x
       const set = gsap.quickSetter(wrap, 'x', 'px'), slide = o.recentreFrames || frames, ez = E('glide');
-      const S = memo(() => { const w0 = spans[0].offsetLeft, Wd = spans.map(s => s.offsetLeft + s.offsetWidth - w0), full = Wd[n - 1]; return Wd.map(w => (full - w) / 2); });
+      const S = memo(() => {
+        const lefts = spans.map(s => s.offsetLeft), rights = spans.map(s => s.offsetLeft + s.offsetWidth);
+        const minL = Math.min(...lefts), maxR = Math.max(...rights), full = Math.max(1, maxR - minL);
+        const isRtl = getComputedStyle(host).direction === 'rtl' || (spans[0].offsetLeft > spans[n - 1].offsetLeft);
+        return spans.map((_, k) => {
+          const curMin = Math.min(...lefts.slice(0, k + 1)), curMax = Math.max(...rights.slice(0, k + 1));
+          const w = curMax - curMin;
+          return isRtl ? -(full - w) / 2 : (full - w) / 2;
+        });
+      });
       R.push(t => {
         const s = S(), ft = t * fps; let k = 0;
         while (k + 1 < n && on[k + 1] <= ft) k++;
@@ -397,8 +406,10 @@ function film(cfg) {
       host.style.width = o.recenter ? 'max-content' : m.full.toFixed(2) + 'px';   // recenter:false reserves the full line; true shrink-wraps (a centred host re-centres)
       if (caret) {
         if (cTop == null) cTop = caret.offsetTop;                     // the caret's authored top = the first line
+        const isRtl = getComputedStyle(host).direction === 'rtl';
+        const cw = caret.offsetWidth || 4;
         caret.style.visibility = fr >= ev[0][0] - 1 && (o.caretOff == null || fr < q(o.caretOff)) ? '' : 'hidden';
-        caret.style.left = (host.offsetLeft + m.xs[n] + gap) + 'px';  // caret and host share an offsetParent
+        caret.style.left = (host.offsetLeft + m.xs[n] + (isRtl ? -(gap + cw) : gap)) + 'px';
         if (m.multi) caret.style.top = (cTop + m.ys[n] - m.ys[0]) + 'px';
       }
     });
@@ -477,7 +488,7 @@ function film(cfg) {
   /* ---- count: one value per frame, decaying step sizes, digits never eased; lands exactly on `to` ---- */
   function count(el, o) {
     const host = one(el), at = q(o.at || 0), N = Math.max(1, o.frames || 24), r = rng(o.seed == null ? 3 : o.seed), round = o.round !== false;
-    const fmtf = o.format === 'comma' ? v => v.toLocaleString('en-US') : o.format || (v => String(v));
+    const fmtf = o.format === 'comma' ? v => v.toLocaleString('en-US') : o.format === 'ar' ? v => Number(v).toLocaleString('ar-EG') : o.format || (v => String(v));
     const w = []; for (let i = 0; i < N; i++) { let x = Math.pow(1 - i / N, 1.6) + .12; if (o.skip && r() < o.skip) x *= 2.2; w.push(x); }
     const tot = w.reduce((a, b) => a + b, 0), span = o.to - o.from, sg = Math.sign(span); let acc = 0;
     const vals = [o.from];

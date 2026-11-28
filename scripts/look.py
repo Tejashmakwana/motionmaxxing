@@ -524,8 +524,9 @@ def main():
     runs = runs_below(M, a.hold_eps)
     longest = max(runs, key=lambda r_: r_[1] - r_[0], default=None)
     hold = 0.0
-    if runs and runs[-1][1] == nf - 1:
-        hold = (nf - runs[-1][0]) / fps
+    tail_slack = max(2, int(round(0.25 * fps)))
+    if runs and runs[-1][1] >= nf - 1 - tail_slack:
+        hold = (runs[-1][1] - runs[-1][0] + 1) / fps
     last_cut = max(cuts) if cuts else 0.0
     final_dur = dur - last_cut
 
